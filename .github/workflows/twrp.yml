@@ -1,0 +1,134 @@
+name: TWRP 14.1 - Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEVICE_TREE:
+        description: 'Device Tree Git URL'
+        required: true
+      DEVICE_TREE_BRANCH:
+        description: 'Device Tree Branch'
+        required: true
+        default: 'android-14'
+      DEVICE_PATH:
+        description: 'Device Path (device/vendor/codename)'
+        required: true
+      DEVICE_NAME:
+        description: 'Device Codename'
+        required: true
+      BUILD_TARGET:
+        description: 'Build Target'
+        required: true
+        default: 'recovery'
+        type: choice
+        options:
+        - recovery
+        - boot
+        - vendorboot
+
+jobs:
+  build:
+    name: Build TWRP by ${{ github.actor }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # -------------------------
+    # AGGRESSIVE DISK CLEANUP
+    # -------------------------
+    - name: Aggressive Disk Cleanup
+      run: |
+        echo "===== Disk usage BEFORE cleanup ====="
+        df -h
+
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/lib/jvm
+        sudo rm -rf /opt/hostedtoolcache
+
+        sudo docker system prune -af || true
+        sudo rm -rf /var/lib/docker || true
+
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+
+        sudo rm -rf /tmp/*
+        sudo rm -rf /var/tmp/*
+
+        echo "===== Disk usage AFTER cleanup ====="
+        df -h
+
+    # -------------------------
+    # SWAP SPACE
+    # -------------------------
+    - name: Setup Swap
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 24
+
+    # -------------------------
+    # DEPENDENCIES
+    # -------------------------
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          git-core gnupg flex bison build-essential zip curl \
+          zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+          libncurses5-dev x11proto-core-dev libx11-dev libgl1-mesa-dev \
+          libxml2-utils xsltproc unzip fontconfig python-is-python3 \
+          bc ccache openjdk-17-jdk repo
+
+    # -------------------------
+    # SYNC TWRP SOURCE
+    # -------------------------
+    - name: Sync TWRP Source
+      run: |
+        mkdir -p ${GITHUB_WORKSPACE}/twrp
+        cd ${GITHUB_WORKSPACE}/twrp
+        repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-14.1
+        repo sync -j$(nproc) --force-sync
+
+    # -------------------------
+    # CLONE DEVICE TREE
+    # -------------------------
+    - name: Clone Device Tree
+      run: |
+        cd ${GITHUB_WORKSPACE}/twrp
+        git clone ${{ inputs.DEVICE_TREE }} -b ${{ inputs.DEVICE_TREE_BRANCH }} ./${{ inputs.DEVICE_PATH }}
+        cd ${{ inputs.DEVICE_PATH }}
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    # -------------------------
+    # BUILD
+    # -------------------------
+    - name: Build TWRP
+      run: |
+        cd ${GITHUB_WORKSPACE}/twrp
+        set +e
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        set -e
+
+        lunch twrp_${{ inputs.DEVICE_NAME }}-eng
+
+        # Clean only device output (saves disk space)
+        rm -rf out/target/product/${{ inputs.DEVICE_NAME }}/obj || true
+
+        mka ${{ inputs.BUILD_TARGET }}image -j$(nproc)
+
+    # -------------------------
+    # UPLOAD ARTIFACT
+    # -------------------------
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: twrp-${{ inputs.DEVICE_NAME }}
+        path: |
+          twrp/out/target/product/${{ inputs.DEVICE_NAME }}/*${{ inputs.BUILD_TARGET }}*.img
